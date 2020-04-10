@@ -15,6 +15,7 @@ package pd
 
 import (
 	"context"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -115,6 +116,74 @@ var (
 	errTSOLength = errors.New("[pd] tso length in rpc response is incorrect")
 )
 
+type clients struct {
+	cs  []*client
+	rnd *rand.Rand
+	num int64
+}
+
+func (c *clients) GetClusterID(ctx context.Context) uint64 {
+	return c.cs[0].GetClusterID(ctx)
+}
+
+func (c clients) GetLeaderAddr() string {
+	return c.cs[0].GetLeaderAddr()
+}
+
+func (c clients) GetTS(ctx context.Context) (int64, int64, error) {
+	return c.cs[c.rnd.Int63()%c.num].GetTS(ctx)
+}
+
+func (c clients) GetTSAsync(ctx context.Context) TSFuture {
+	return c.cs[c.rnd.Int63()%c.num].GetTSAsync(ctx)
+}
+
+func (c clients) GetRegion(ctx context.Context, key []byte) (*metapb.Region, *metapb.Peer, error) {
+	return c.cs[c.rnd.Int63()%c.num].GetRegion(ctx, key)
+}
+
+func (c clients) GetPrevRegion(ctx context.Context, key []byte) (*metapb.Region, *metapb.Peer, error) {
+	return c.cs[c.rnd.Int63()%c.num].GetPrevRegion(ctx, key)
+}
+
+func (c clients) GetRegionByID(ctx context.Context, regionID uint64) (*metapb.Region, *metapb.Peer, error) {
+	return c.cs[c.rnd.Int63()%c.num].GetRegionByID(ctx, regionID)
+}
+
+func (c clients) ScanRegions(ctx context.Context, key, endKey []byte, limit int) ([]*metapb.Region, []*metapb.Peer, error) {
+	return c.cs[c.rnd.Int63()%c.num].ScanRegions(ctx, key, endKey, limit)
+}
+
+func (c clients) GetStore(ctx context.Context, storeID uint64) (*metapb.Store, error) {
+	return c.cs[c.rnd.Int63()%c.num].GetStore(ctx, storeID)
+}
+
+func (c clients) GetAllStores(ctx context.Context, opts ...GetStoreOption) ([]*metapb.Store, error) {
+	return c.cs[c.rnd.Int63()%c.num].GetAllStores(ctx, opts...)
+}
+
+func (c clients) UpdateGCSafePoint(ctx context.Context, safePoint uint64) (uint64, error) {
+	return c.cs[c.rnd.Int63()%c.num].UpdateGCSafePoint(ctx, safePoint)
+}
+
+func (c clients) ScatterRegion(ctx context.Context, regionID uint64) error {
+	return c.cs[c.rnd.Int63()%c.num].ScatterRegion(ctx, regionID)
+}
+
+func (c clients) GetOperator(ctx context.Context, regionID uint64) (*pdpb.GetOperatorResponse, error) {
+	return c.cs[c.rnd.Int63()%c.num].GetOperator(ctx, regionID)
+}
+
+func (c clients) ConfigClient() ConfigClient {
+	return c.cs[c.rnd.Int63()%c.num].ConfigClient()
+}
+
+func (c clients) Close() {
+	for i := range c.cs {
+		c.cs[i].Close()
+	}
+}
+
 type client struct {
 	*baseClient
 	tsoRequests chan *tsoRequest
@@ -130,8 +199,24 @@ func NewClient(pdAddrs []string, security SecurityOption, opts ...ClientOption) 
 	return NewClientWithContext(context.Background(), pdAddrs, security, opts...)
 }
 
-// NewClientWithContext creates a PD client with context.
 func NewClientWithContext(ctx context.Context, pdAddrs []string, security SecurityOption, opts ...ClientOption) (Client, error) {
+	log.Info("[pd] create pd client with endpoints", zap.Strings("pd-address", pdAddrs))
+	cli := &clients{
+		rnd: rand.New(rand.NewSource(time.Now().UnixNano())),
+		num: 8,
+	}
+	for i := int64(0); i < cli.num; i++ {
+		c, err := newClientWithContext(ctx, pdAddrs, security, opts...)
+		if err != nil {
+			return nil, err
+		}
+		cli.cs = append(cli.cs, c)
+	}
+	return cli, nil
+}
+
+// NewClientWithContext creates a PD client with context.
+func newClientWithContext(ctx context.Context, pdAddrs []string, security SecurityOption, opts ...ClientOption) (*client, error) {
 	log.Info("[pd] create pd client with endpoints", zap.Strings("pd-address", pdAddrs))
 	base, err := newBaseClient(ctx, addrsToUrls(pdAddrs), security, opts...)
 	if err != nil {
